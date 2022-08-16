@@ -18,19 +18,26 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "baro.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
+typedef StaticSemaphore_t osStaticSemaphoreDef_t;
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define countof(_a) (sizeof(_a)/sizeof(_a[0]))
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -45,6 +52,33 @@ TIM_HandleTypeDef htim9;
 
 UART_HandleTypeDef huart1;
 
+/* Definitions for taskLEDBlink */
+osThreadId_t taskLEDBlinkHandle;
+const osThreadAttr_t taskLEDBlink_attributes = {
+  .name = "taskLEDBlink",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for taskButtonRead */
+osThreadId_t taskButtonReadHandle;
+const osThreadAttr_t taskButtonRead_attributes = {
+  .name = "taskButtonRead",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for muxUART */
+osMutexId_t muxUARTHandle;
+const osMutexAttr_t muxUART_attributes = {
+  .name = "muxUART"
+};
+/* Definitions for semButtonPressed */
+osSemaphoreId_t semButtonPressedHandle;
+osStaticSemaphoreDef_t semButtonPressedControlBlock;
+const osSemaphoreAttr_t semButtonPressed_attributes = {
+  .name = "semButtonPressed",
+  .cb_mem = &semButtonPressedControlBlock,
+  .cb_size = sizeof(semButtonPressedControlBlock),
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -55,6 +89,9 @@ static void MX_GPIO_Init(void);
 static void MX_TIM9_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
+void StartTaskLEDBlink(void *argument);
+void StartTaskButtonRead(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -97,42 +134,64 @@ int main(void)
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
 
-  HAL_TIM_Base_Start(&htim9);
 
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+  /* Create the mutex(es) */
+  /* creation of muxUART */
+  muxUARTHandle = osMutexNew(&muxUART_attributes);
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* creation of semButtonPressed */
+  semButtonPressedHandle = osSemaphoreNew(1, 1, &semButtonPressed_attributes);
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of taskLEDBlink */
+  taskLEDBlinkHandle = osThreadNew(StartTaskLEDBlink, NULL, &taskLEDBlink_attributes);
+
+  /* creation of taskButtonRead */
+  taskButtonReadHandle = osThreadNew(StartTaskButtonRead, NULL, &taskButtonRead_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  char text[100] = {0};
-  //uint8_t cnt = 0;
-
   while (1)
-  {
-	  //sprintf(text, "Hello world, %d\n", cnt++);
-	  //HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), HAL_MAX_DELAY);
-
-	  uint8_t buf[4] = {0};
-	  buf[0] = 0xD0;
-	  if(HAL_I2C_Master_Transmit(&hi2c1, (0x76 << 1), buf, 1, HAL_MAX_DELAY) != HAL_OK){
-		  sprintf(text, "I2C Transmit ERROR\n");
-		  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), HAL_MAX_DELAY);
-	  }
-	  buf[0] = 0;
-	  if(HAL_I2C_Master_Receive( &hi2c1, (0x76 << 1), buf, 1, HAL_MAX_DELAY) != HAL_OK){
-		  sprintf(text, "I2C Transmit ERROR\n");
-		  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), HAL_MAX_DELAY);
-	  }
-
-	  sprintf(text, "0x%02X\n", buf[0]);
-	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), HAL_MAX_DELAY);
-
-	  HAL_Delay(1000);
+    {
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+    }
   /* USER CODE END 3 */
 }
 
@@ -299,6 +358,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
@@ -317,20 +377,65 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(BUTTON_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 }
 
 /* USER CODE BEGIN 4 */
 
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-  if (htim == &htim9) {
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
-  }
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  osSemaphoreRelease(semButtonPressedHandle);
 }
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartTaskLEDBlink */
+/**
+  * @brief  Function implementing the taskLEDBlink thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartTaskLEDBlink */
+void StartTaskLEDBlink(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+	  char *text = "Task1 123!\n";
+	  osMutexAcquire(muxUARTHandle, osWaitForever);
+	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), 1000);
+	  osMutexRelease(muxUARTHandle);
+
+	  osDelay(pdMS_TO_TICKS(300));
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartTaskButtonRead */
+/**
+* @brief Function implementing the taskButtonRead thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartTaskButtonRead */
+void StartTaskButtonRead(void *argument)
+{
+  /* USER CODE BEGIN StartTaskButtonRead */
+  /* Infinite loop */
+  for(;;)
+  {
+	  char *text = "2 TASK 654!\n";
+	  osMutexAcquire(muxUARTHandle, osWaitForever);
+	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), 1000);
+	  osMutexRelease(muxUARTHandle);
+
+	  osDelay(pdMS_TO_TICKS(300));
+  }
+  /* USER CODE END StartTaskButtonRead */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

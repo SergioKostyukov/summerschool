@@ -23,21 +23,24 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "baro.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <string.h>
+#include "lcd.h"
+#include <stdio.h>	// snprintf
+#include <string.h>	// memset
+#include <math.h>	// sin
+#include <stdlib.h>	// rand
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
-typedef StaticSemaphore_t osStaticSemaphoreDef_t;
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define countof(_a) (sizeof(_a)/sizeof(_a[0]))
+#define countof(_a)	(sizeof(_a) / sizeof(_a[0]))
+#define UART_RX_BUF_SIZE	200
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,9 +51,12 @@ typedef StaticSemaphore_t osStaticSemaphoreDef_t;
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim9;
 
 UART_HandleTypeDef huart1;
+DMA_HandleTypeDef hdma_usart1_rx;
 
 /* Definitions for taskLEDBlink */
 osThreadId_t taskLEDBlinkHandle;
@@ -71,24 +77,25 @@ osMutexId_t muxUARTHandle;
 const osMutexAttr_t muxUART_attributes = {
   .name = "muxUART"
 };
-/* Definitions for semButtonPressed */
-osSemaphoreId_t semButtonPressedHandle;
-osStaticSemaphoreDef_t semButtonPressedControlBlock;
-const osSemaphoreAttr_t semButtonPressed_attributes = {
-  .name = "semButtonPressed",
-  .cb_mem = &semButtonPressedControlBlock,
-  .cb_size = sizeof(semButtonPressedControlBlock),
+/* Definitions for muxLCD */
+osMutexId_t muxLCDHandle;
+const osMutexAttr_t muxLCD_attributes = {
+  .name = "muxLCD"
 };
 /* USER CODE BEGIN PV */
+static uint8_t rx_buffer[UART_RX_BUF_SIZE];
+static uint8_t *rx_head = rx_buffer, *rx_tail = rx_buffer;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_TIM9_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_SPI1_Init(void);
 void StartTaskLEDBlink(void *argument);
 void StartTaskButtonRead(void *argument);
 
@@ -98,6 +105,29 @@ void StartTaskButtonRead(void *argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+char text[100];
+
+int __io_getchar(void) {
+	rx_head = &rx_buffer[UART_RX_BUF_SIZE - hdma_usart1_rx.Instance->NDTR];
+
+	while (rx_tail == rx_head) {
+		rx_head = &rx_buffer[UART_RX_BUF_SIZE - hdma_usart1_rx.Instance->NDTR];
+//		osDelay(1);
+	}
+
+	uint8_t b = *rx_tail;
+
+	if (++rx_tail == (rx_buffer + UART_RX_BUF_SIZE))
+//	if (++rx_tail == &rx_buffer[UART_RX_BUF_SIZE])
+		rx_tail = rx_buffer;
+
+	return (int)b;
+}
+
+int __io_putchar(int ch) {
+	HAL_UART_Transmit(&huart1, (uint8_t*)&ch, 1, 100);
+	return 0;
+}
 
 /* USER CODE END 0 */
 
@@ -129,11 +159,46 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM9_Init();
   MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
 
+  if (HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer)) != HAL_OK) {
+	  snprintf(text, countof(text), "Error start UART RX %d\n", __LINE__);
+	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strnlen(text, countof(text)), 1000);
+	  while (1) {}
+  }
+
+  snprintf(text, countof(text), "Start UART RX %d\n", __LINE__);
+  HAL_UART_Transmit(&huart1, (uint8_t*)text, strnlen(text, countof(text)), 1000);
+
+//  if (baro_init() != BARO_OK) {
+//	  snprintf(text, countof(text), "Error init baro\n");
+//	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strnlen(text, countof(text)), 1000);
+//	  while (1) {}
+//  }
+
+//  for (uint16_t p = 0; p < 100; p++) {
+//	  lcd_pixel(p, p+0, ST7735_RED);
+//	  lcd_pixel(p, p+1, ST7735_GREEN);
+//	  lcd_pixel(p, p+2, ST7735_BLUE);
+//  }
+//
+//  lcd_fill_rect(10, 10, 50, 50, ST7735_CYAN);
+//  lcd_fill_rect(50, 50, 150, 150, ST7735_MAGENTA);
+//  lcd_rect(5, 5, 15, 15, ST77XX_ORANGE);
+//  lcd_rect(200, 200, 15, 15, ST77XX_ORANGE);
+//  lcd_line(13, 19, 37, 93, ST77XX_GREEN);
+//  lcd_line(13, 19, 93, 37, ST77XX_GREEN);
+//  lcd_circle(22, 55, 76, ST77XX_RED);
+//  lcd_fill_circle(33, 66, 19, ST77XX_BLUE);
+//  lcd_print("Hello LCD!");
+//  lcd_set_text_color(ST7735_CYAN);
+//  lcd_set_text_bg_color(ST7735_ORANGE);
+//  lcd_print("\nNew line!");
 
   /* USER CODE END 2 */
 
@@ -143,13 +208,12 @@ int main(void)
   /* creation of muxUART */
   muxUARTHandle = osMutexNew(&muxUART_attributes);
 
+  /* creation of muxLCD */
+  muxLCDHandle = osMutexNew(&muxLCD_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
-
-  /* Create the semaphores(s) */
-  /* creation of semButtonPressed */
-  semButtonPressedHandle = osSemaphoreNew(1, 1, &semButtonPressed_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -176,22 +240,28 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_EVENTS */
   /* add events, ... */
+  lcd_init();
+
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
-  osKernelStart();
+  //osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  printf("This text is from printf(), %d, %s, %s\n", __LINE__, __FILE__, __FUNCTION__);
 
   while (1)
-    {
+  {
+	  int c = __io_getchar();
+	  HAL_UART_Transmit(&huart1, (uint8_t*)&c, 1, 1000);
+
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    }
+  }
   /* USER CODE END 3 */
 }
 
@@ -275,6 +345,44 @@ static void MX_I2C1_Init(void)
 }
 
 /**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
   * @brief TIM9 Initialization Function
   * @param None
   * @retval None
@@ -346,6 +454,22 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -357,11 +481,14 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, LCD_RESET_Pin|LCD_CS_Pin|LCD_A0_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : LED_Pin */
   GPIO_InitStruct.Pin = LED_Pin;
@@ -369,6 +496,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LCD_RESET_Pin LCD_CS_Pin LCD_A0_Pin */
+  GPIO_InitStruct.Pin = LCD_RESET_Pin|LCD_CS_Pin|LCD_A0_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : BUTTON_Pin */
   GPIO_InitStruct.Pin = BUTTON_Pin;
@@ -383,10 +517,8 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  osSemaphoreRelease(semButtonPressedHandle);
 }
 
 /* USER CODE END 4 */
@@ -404,12 +536,15 @@ void StartTaskLEDBlink(void *argument)
   /* Infinite loop */
   for(;;)
   {
-	  char *text = "Task1 123!\n";
-	  osMutexAcquire(muxUARTHandle, osWaitForever);
-	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), 1000);
-	  osMutexRelease(muxUARTHandle);
+	  osMutexAcquire(muxLCDHandle, osWaitForever);
+	  lcd_fill_circle(80, 80, 30, ST77XX_BLACK);
+	  osMutexRelease(muxLCDHandle);
+	  osDelay(300);
 
-	  osDelay(pdMS_TO_TICKS(300));
+	  osMutexAcquire(muxLCDHandle, osWaitForever);
+	  lcd_fill_circle(80, 80, 30, ST77XX_RED);
+	  osMutexRelease(muxLCDHandle);
+	  osDelay(300);
   }
   /* USER CODE END 5 */
 }
@@ -424,15 +559,20 @@ void StartTaskLEDBlink(void *argument)
 void StartTaskButtonRead(void *argument)
 {
   /* USER CODE BEGIN StartTaskButtonRead */
+	  lcd_init();
+	  lcd_fill(ST7735_BLACK);
   /* Infinite loop */
   for(;;)
   {
-	  char *text = "2 TASK 654!\n";
-	  osMutexAcquire(muxUARTHandle, osWaitForever);
-	  HAL_UART_Transmit(&huart1, (uint8_t*)text, strlen(text), 1000);
-	  osMutexRelease(muxUARTHandle);
+	  osMutexAcquire(muxLCDHandle, osWaitForever);
+	  lcd_fill_circle(30, 30, 25, ST77XX_BLACK);
+	  osMutexRelease(muxLCDHandle);
+	  osDelay(200);
 
-	  osDelay(pdMS_TO_TICKS(300));
+	  osMutexAcquire(muxLCDHandle, osWaitForever);
+	  lcd_fill_circle(30, 30, 25, ST77XX_BLUE);
+	  osMutexRelease(muxLCDHandle);
+	  osDelay(200);
   }
   /* USER CODE END StartTaskButtonRead */
 }

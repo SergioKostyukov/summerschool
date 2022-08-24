@@ -24,6 +24,7 @@
 /* USER CODE BEGIN Includes */
 #include "baro.h"
 #include "lcd.h"
+#include "wifi_at.h"
 #include <stdio.h>	// snprintf
 #include <string.h>	// memset
 #include <math.h>	// sin
@@ -56,31 +57,40 @@ SPI_HandleTypeDef hspi1;
 TIM_HandleTypeDef htim9;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart1_rx;
 
-/* Definitions for taskLEDBlink */
-osThreadId_t taskLEDBlinkHandle;
-const osThreadAttr_t taskLEDBlink_attributes = {
-  .name = "taskLEDBlink",
+/* Definitions for taskWIFI */
+osThreadId_t taskWIFIHandle;
+const osThreadAttr_t taskWIFI_attributes = {
+  .name = "taskWIFI",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for taskButtonRead */
-osThreadId_t taskButtonReadHandle;
-const osThreadAttr_t taskButtonRead_attributes = {
-  .name = "taskButtonRead",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-/* Definitions for muxUART */
-osMutexId_t muxUARTHandle;
-const osMutexAttr_t muxUART_attributes = {
-  .name = "muxUART"
+/* Definitions for muxUART_LOG */
+osMutexId_t muxUART_LOGHandle;
+const osMutexAttr_t muxUART_LOG_attributes = {
+  .name = "muxUART_LOG"
 };
 /* Definitions for muxLCD */
 osMutexId_t muxLCDHandle;
 const osMutexAttr_t muxLCD_attributes = {
   .name = "muxLCD"
+};
+/* Definitions for muxUART_WIFI */
+osMutexId_t muxUART_WIFIHandle;
+const osMutexAttr_t muxUART_WIFI_attributes = {
+  .name = "muxUART_WIFI"
+};
+/* Definitions for semUART_TX_WIFI */
+osSemaphoreId_t semUART_TX_WIFIHandle;
+const osSemaphoreAttr_t semUART_TX_WIFI_attributes = {
+  .name = "semUART_TX_WIFI"
+};
+/* Definitions for semUART_RX_WIFI */
+osSemaphoreId_t semUART_RX_WIFIHandle;
+const osSemaphoreAttr_t semUART_RX_WIFI_attributes = {
+  .name = "semUART_RX_WIFI"
 };
 /* USER CODE BEGIN PV */
 static uint8_t rx_buffer[UART_RX_BUF_SIZE];
@@ -96,8 +106,8 @@ static void MX_TIM9_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
-void StartTaskLEDBlink(void *argument);
-void StartTaskButtonRead(void *argument);
+static void MX_USART6_UART_Init(void);
+void StartTaskWIFI(void *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -112,13 +122,12 @@ int __io_getchar(void) {
 
 	while (rx_tail == rx_head) {
 		rx_head = &rx_buffer[UART_RX_BUF_SIZE - hdma_usart1_rx.Instance->NDTR];
-//		osDelay(1);
+ 		osDelay(1);
 	}
 
 	uint8_t b = *rx_tail;
 
 	if (++rx_tail == (rx_buffer + UART_RX_BUF_SIZE))
-//	if (++rx_tail == &rx_buffer[UART_RX_BUF_SIZE])
 		rx_tail = rx_buffer;
 
 	return (int)b;
@@ -164,6 +173,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
+  MX_USART6_UART_Init();
   /* USER CODE BEGIN 2 */
 
   if (HAL_UART_Receive_DMA(&huart1, rx_buffer, sizeof(rx_buffer)) != HAL_OK) {
@@ -205,15 +215,25 @@ int main(void)
   /* Init scheduler */
   osKernelInitialize();
   /* Create the mutex(es) */
-  /* creation of muxUART */
-  muxUARTHandle = osMutexNew(&muxUART_attributes);
+  /* creation of muxUART_LOG */
+  muxUART_LOGHandle = osMutexNew(&muxUART_LOG_attributes);
 
   /* creation of muxLCD */
   muxLCDHandle = osMutexNew(&muxLCD_attributes);
 
+  /* creation of muxUART_WIFI */
+  muxUART_WIFIHandle = osMutexNew(&muxUART_WIFI_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* creation of semUART_TX_WIFI */
+  semUART_TX_WIFIHandle = osSemaphoreNew(1, 1, &semUART_TX_WIFI_attributes);
+
+  /* creation of semUART_RX_WIFI */
+  semUART_RX_WIFIHandle = osSemaphoreNew(1, 1, &semUART_RX_WIFI_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* add semaphores, ... */
@@ -228,11 +248,8 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of taskLEDBlink */
-  taskLEDBlinkHandle = osThreadNew(StartTaskLEDBlink, NULL, &taskLEDBlink_attributes);
-
-  /* creation of taskButtonRead */
-  taskButtonReadHandle = osThreadNew(StartTaskButtonRead, NULL, &taskButtonRead_attributes);
+  /* creation of taskWIFI */
+  taskWIFIHandle = osThreadNew(StartTaskWIFI, NULL, &taskWIFI_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -245,7 +262,7 @@ int main(void)
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
-  //osKernelStart();
+  osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
@@ -454,6 +471,39 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -523,58 +573,26 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartTaskLEDBlink */
+/* USER CODE BEGIN Header_StartTaskWIFI */
 /**
-  * @brief  Function implementing the taskLEDBlink thread.
+  * @brief  Function implementing the taskWIFI thread.
   * @param  argument: Not used
   * @retval None
   */
-/* USER CODE END Header_StartTaskLEDBlink */
-void StartTaskLEDBlink(void *argument)
+/* USER CODE END Header_StartTaskWIFI */
+void StartTaskWIFI(void *argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
+
+  wifi_init();
+  wifi_connect_to_ap(ap_name, pass, tmt)
+
   for(;;)
   {
-	  osMutexAcquire(muxLCDHandle, osWaitForever);
-	  lcd_fill_circle(80, 80, 30, ST77XX_BLACK);
-	  osMutexRelease(muxLCDHandle);
-	  osDelay(300);
 
-	  osMutexAcquire(muxLCDHandle, osWaitForever);
-	  lcd_fill_circle(80, 80, 30, ST77XX_RED);
-	  osMutexRelease(muxLCDHandle);
-	  osDelay(300);
   }
   /* USER CODE END 5 */
-}
-
-/* USER CODE BEGIN Header_StartTaskButtonRead */
-/**
-* @brief Function implementing the taskButtonRead thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartTaskButtonRead */
-void StartTaskButtonRead(void *argument)
-{
-  /* USER CODE BEGIN StartTaskButtonRead */
-	  lcd_init();
-	  lcd_fill(ST7735_BLACK);
-  /* Infinite loop */
-  for(;;)
-  {
-	  osMutexAcquire(muxLCDHandle, osWaitForever);
-	  lcd_fill_circle(30, 30, 25, ST77XX_BLACK);
-	  osMutexRelease(muxLCDHandle);
-	  osDelay(200);
-
-	  osMutexAcquire(muxLCDHandle, osWaitForever);
-	  lcd_fill_circle(30, 30, 25, ST77XX_BLUE);
-	  osMutexRelease(muxLCDHandle);
-	  osDelay(200);
-  }
-  /* USER CODE END StartTaskButtonRead */
 }
 
 /**
